@@ -238,7 +238,7 @@ body.banner-visible #questionBox { margin-top: 70px; min-height: calc(100vh - 85
 </div>
 
 <div id="landingPage" class="colourful-welcome">
-  <h1>🏆 CHIZ QUIZ SYSTEM</h1>
+  <h1>🏆 AI-ASSISTED COMPETITIVE ACADEMIC QUIZ & ASSESMENT PLATFORM </h1>
   <h2>For Quiz and Written Answers</h2>
   <p style="font-size: 18px; margin-bottom: 10px;">Enter your team credentials to begin.</p>
 </div>
