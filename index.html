@@ -2,6 +2,7 @@
 <html>
 <head>
 <base target="_top">
+<title>AI-ASSISTED COMPETITIVE ACADEMIC QUIZ AND ASSESSMENT PLATFORM</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <script>
   MathJax = {
@@ -238,7 +239,7 @@ body.banner-visible #questionBox { margin-top: 70px; min-height: calc(100vh - 85
 </div>
 
 <div id="landingPage" class="colourful-welcome">
-  <h1>🏆 CHIZ QUIZ SYSTEM</h1>
+  <h1>🏆 AI-ASSISTED COMPETITIVE ACADEMIC QUIZ AND ASSESSMENT PLATFORM</h1>
   <h2>For Quiz and Written Answers</h2>
   <p style="font-size: 18px; margin-bottom: 10px;">Enter your team credentials to begin.</p>
 </div>
@@ -348,7 +349,7 @@ if (APPS_SCRIPT_URL.includes('PASTE_YOUR')) {
 }
 
 // ═══════════════════════════════════════════
-// JSONP CALL SERVER (reads) — see WRITE_FUNCTIONS below for POST routing
+// JSONP CALL SERVER
 // ═══════════════════════════════════════════
 function callServerGET(functionName, args) {
   return new Promise(function(resolve, reject) {
@@ -386,7 +387,12 @@ function callServerPOST(functionName, args) {
     return res.result;
   });
 }
-const WRITE_FUNCTIONS = new Set(['verifyTeam', 'submitAnswer', 'submitRegistration', 'saveProctoringSnapshot', 'saveProctoringAudio', 'logIntegrityEvent', 'syncOfflineData']);
+// NOTE: startOrResumeQuestion writes to the sheet → route via POST.
+const WRITE_FUNCTIONS = new Set([
+  'verifyTeam', 'submitAnswer', 'submitRegistration',
+  'saveProctoringSnapshot', 'saveProctoringAudio', 'logIntegrityEvent', 'syncOfflineData',
+  'startOrResumeQuestion'
+]);
 function callServer(functionName, ...args) {
   return WRITE_FUNCTIONS.has(functionName) ? callServerPOST(functionName, args) : callServerGET(functionName, args);
 }
@@ -604,7 +610,7 @@ let questionActive = false;
 // AI polling state
 let aiPollingActive = false;
 let aiPollingAttempts = 0;
-let aiPollingMaxAttempts = 9999; // effectively infinite
+let aiPollingMaxAttempts = 9999;
 
 // Store textarea resize handler to avoid duplicate listeners
 let textAnswerResizeHandler = null;
@@ -1028,7 +1034,7 @@ function lockQuizUI(title, msg) {
   quizLocked = true;
   stopGlobalTimer();
   questionActive = false;
-  stopAIPolling(); // stop any AI polling
+  stopAIPolling();
   document.getElementById('integrityLockTitle').textContent = title;
   document.getElementById('integrityLockMsg').textContent = msg;
   document.getElementById('integrityLock').style.display = 'block';
@@ -1361,7 +1367,7 @@ function loadLeaderboard(categoryId) {
 }
 
 // ═══════════════════════════════════════════
-// AI POLLING (improved)
+// AI POLLING
 // ═══════════════════════════════════════════
 function stopAIPolling() {
   if (pollInterval) {
@@ -1373,7 +1379,6 @@ function stopAIPolling() {
   document.getElementById('aiStatus').style.display = 'none';
 }
 
-// Refactored AI result handler to avoid duplication
 function displayAIResult(result) {
   clearInterval(pollInterval);
   aiPollingActive = false;
@@ -1411,7 +1416,6 @@ function startPollingForResult(team, categoryId, qid) {
         displayAIResult(result);
         return;
       }
-
       let msg = '⏳ AI Grading in progress... ';
       if (aiPollingAttempts > 20) {
         msg += ' (taking longer than expected – we\'ll keep checking)';
@@ -1421,9 +1425,7 @@ function startPollingForResult(team, categoryId, qid) {
         msg += ' You can close this question and come back later; we\'ll update when ready.';
       }
       document.getElementById('aiStatus').innerHTML = msg;
-    }).catch(function() {
-      // network error – continue polling
-    });
+    }).catch(function() {});
   }, 3000);
 }
 
@@ -1441,10 +1443,65 @@ function manualCheckAIStatus() {
 }
 
 // ═══════════════════════════════════════════
-// OPEN QUESTION (with image-first loading)
+// TIMER PERSISTENCE HELPERS  (NEW)
+// ═══════════════════════════════════════════
+function timerCacheKey(questionId, categoryId) {
+  return 'chiz_timer_' + team + '_' + categoryId + '_' + questionId;
+}
+
+function readLocalTimer(cacheKey) {
+  try {
+    const raw = localStorage.getItem(cacheKey);
+    if (!raw) return { endTime: null, duration: null, resumed: false, expired: false };
+    const parsed = JSON.parse(raw);
+    return {
+      endTime: parsed.endTime,
+      duration: parsed.duration,
+      resumed: true,
+      expired: Date.now() >= parsed.endTime
+    };
+  } catch (e) {
+    return { endTime: null, duration: null, resumed: false, expired: false };
+  }
+}
+
+function fetchOrResumeTimer(questionId, categoryId) {
+  const cacheKey = timerCacheKey(questionId, categoryId);
+
+  if (!navigator.onLine) {
+    return Promise.resolve(readLocalTimer(cacheKey));
+  }
+
+  return callServer("startOrResumeQuestion", team, categoryId, questionId)
+    .then(function(res) {
+      if (res && res.success) {
+        try {
+          localStorage.setItem(cacheKey, JSON.stringify({
+            endTime: res.endTime,
+            duration: res.duration
+          }));
+        } catch (e) {}
+        return {
+          endTime: res.endTime,
+          duration: res.duration,
+          resumed: res.resumed,
+          expired: res.expired
+        };
+      }
+      if (res && res.error) throw new Error(res.error);
+      throw new Error("Could not start timer.");
+    })
+    .catch(function(err) {
+      const cached = readLocalTimer(cacheKey);
+      if (cached.endTime) return cached;
+      throw err;
+    });
+}
+
+// ═══════════════════════════════════════════
+// OPEN QUESTION (with image-first loading AND persistent timer)
 // ═══════════════════════════════════════════
 function openQuestion(id, categoryId) {
-  // Stop any previous AI polling
   stopAIPolling();
 
   currentQuestion = id;
@@ -1455,7 +1512,7 @@ function openQuestion(id, categoryId) {
 
   questionActive = true;
 
-  // Hide all question UI elements initially
+  // Reset UI skeleton
   document.getElementById("questionText").innerText = "";
   document.getElementById("pointsDisplay").innerHTML = "";
   document.getElementById("timerDisplay").innerHTML = "⏱ ...";
@@ -1472,68 +1529,33 @@ function openQuestion(id, categoryId) {
   document.getElementById("imageLoadingMsg").style.display = "none";
   document.getElementById("aiStatus").style.display = "none";
   document.getElementById("checkStatusBtn").style.display = "none";
+  document.getElementById("questionBox").style.display = "block";
+  document.getElementById("board").style.display = "none";
 
-  if (questionEndTimes[id] && Date.now() < questionEndTimes[id]) {
-    // no action needed; timer will be updated later
-  }
+  // STEP 1: fetch or resume the persisted timer BEFORE loading the question
+  fetchOrResumeTimer(id, categoryId)
+    .then(function (timerInfo) {
+      if (!timerInfo.endTime) throw new Error("Server did not return a timer.");
+      questionEndTimes[id] = timerInfo.endTime;
+      currentTimerId = id;
+      // STEP 2: load and render the question, passing along the timer
+      loadAndRenderQuestion(id, categoryId, timerInfo);
+    })
+    .catch(function (err) {
+      console.error("Timer fetch failed:", err);
+      alert("⚠️ " + (err && err.message ? err.message : "Could not start question timer."));
+      backToBoard();
+    });
+}
 
-  const renderQuestion = function(q) {
-    document.getElementById("answerArea").style.display = "block";
-    document.getElementById("questionText").innerText = q.question;
-    document.getElementById("pointsDisplay").innerHTML = "🏆 Points: " + q.maxScore;
-    const seconds = Number(q.time) || 30;
-    questionEndTimes[id] = Date.now() + (seconds * 1000);
-    currentTimerId = id;
-    const optionsDiv = document.getElementById("options");
-    optionsDiv.innerHTML = "";
-    selectedAnswer = "";
-    const questionType = String(q.type || "").trim().toUpperCase();
-    if (questionType === "MCQ") {
-      document.getElementById("textAnswer").style.display = "none";
-      document.getElementById("submitBtn").style.display = "block";
-      hideMathToolbar();
-      ["optionA", "optionB", "optionC", "optionD"].forEach(function(key) {
-        if (q[key]) {
-          const optBtn = document.createElement("button");
-          optBtn.innerHTML = q[key];
-          optBtn.onclick = function() {
-            document.querySelectorAll("#options button").forEach(function(b) { b.classList.remove("selected"); });
-            optBtn.classList.add("selected");
-            selectedAnswer = key.slice(-1).toUpperCase();
-          };
-          optionsDiv.appendChild(optBtn);
-        }
-      });
-    } else {
-      document.getElementById("textAnswer").style.display = "block";
-      document.getElementById("submitBtn").style.display = "block";
-      document.getElementById("textAnswer").value = "";
-      showMathToolbar();
-      document.getElementById("textAnswer").focus();
-      // Attach auto-resize handler (remove old one first)
-      const ta = document.getElementById("textAnswer");
-      if (textAnswerResizeHandler) {
-        ta.removeEventListener("input", textAnswerResizeHandler);
-      }
-      textAnswerResizeHandler = function() {
-        this.style.height = "auto";
-        this.style.height = this.scrollHeight + "px";
-      };
-      ta.addEventListener("input", textAnswerResizeHandler);
-      ta.style.height = "auto";
-      ta.style.height = ta.scrollHeight + "px";
-    }
-    document.getElementById("questionBox").style.display = "block";
-    document.getElementById("board").style.display = "none";
-    checkTimers();
-  };
+function loadAndRenderQuestion(id, categoryId, timerInfo) {
+  const renderQuestion = function (q) { renderQuestionInner(q, id, categoryId, timerInfo); };
 
-  const onQuestionData = function(q) {
+  const onQuestionData = function (q) {
     const imageField = q.image && q.image.trim();
     if (imageField) {
       const extracted = extractDriveFileId(imageField);
       if (extracted && !extracted.startsWith('http')) {
-        // It's a Google Drive file ID
         document.getElementById("imageLoadingMsg").style.display = "block";
         document.getElementById("imageLoadingMsg").innerHTML = "⏳ Loading image...";
         getCachedQuestionImage(extracted).then(function(cachedDataUrl) {
@@ -1553,10 +1575,9 @@ function openQuestion(id, categoryId) {
                   document.getElementById("questionImage").innerHTML = '<img src="' + dataUrl + '" alt="Question Image" style="max-width: 100%; max-height: 300px;">';
                   renderQuestion(q);
                 } else {
-                  // Image failed but we still show question and allow answering
                   document.getElementById("imageLoadingMsg").innerHTML = '❌ Image not available. You can still answer the question below. <button class="retry-btn" onclick="openQuestion(\'' + id + '\', \'' + categoryId + '\')">🔄 Retry Image</button>';
                   document.getElementById("imageLoadingMsg").style.display = "block";
-                  renderQuestion(q); // allow answering even without image
+                  renderQuestion(q);
                 }
               }).catch(function() {
                 document.getElementById("imageLoadingMsg").innerHTML = '❌ Image not available (network error). You can still answer the question below. <button class="retry-btn" onclick="openQuestion(\'' + id + '\', \'' + categoryId + '\')">🔄 Retry Image</button>';
@@ -1572,7 +1593,6 @@ function openQuestion(id, categoryId) {
         });
         return;
       } else {
-        // External URL or already a full URL
         document.getElementById("questionImage").style.display = "block";
         document.getElementById("questionImage").innerHTML = '<img src="' + extracted + '" alt="Question Image" style="max-width: 100%; max-height: 300px;">';
         renderQuestion(q);
@@ -1583,7 +1603,8 @@ function openQuestion(id, categoryId) {
     }
   };
 
-  callServer("getQuestionForCategory", id, categoryId)
+  // Uses the SECURE version so the answer isn't leaked to the browser.
+  callServer("getQuestionForCategorySecure", id, categoryId, team)
     .then(onQuestionData)
     .catch(function(error) {
       const cached = getCachedQuestions(categoryId);
@@ -1596,6 +1617,64 @@ function openQuestion(id, categoryId) {
         backToBoard();
       }
     });
+}
+
+function renderQuestionInner(q, id, categoryId, timerInfo) {
+  document.getElementById("answerArea").style.display = "block";
+  document.getElementById("questionText").innerText = q.question;
+  document.getElementById("pointsDisplay").innerHTML = "🏆 Points: " + q.maxScore;
+
+  // TIMER: honour the persisted end time
+  if (timerInfo && timerInfo.endTime) {
+    questionEndTimes[id] = timerInfo.endTime;
+  } else if (!questionEndTimes[id]) {
+    const seconds = Number(q.time) || 30;
+    questionEndTimes[id] = Date.now() + (seconds * 1000);
+  }
+  currentTimerId = id;
+
+  const optionsDiv = document.getElementById("options");
+  optionsDiv.innerHTML = "";
+  selectedAnswer = "";
+  const questionType = String(q.type || "").trim().toUpperCase();
+  if (questionType === "MCQ") {
+    document.getElementById("textAnswer").style.display = "none";
+    document.getElementById("submitBtn").style.display = "block";
+    hideMathToolbar();
+    ["optionA", "optionB", "optionC", "optionD"].forEach(function(key) {
+      if (q[key]) {
+        const optBtn = document.createElement("button");
+        optBtn.innerHTML = q[key];
+        optBtn.onclick = function() {
+          document.querySelectorAll("#options button").forEach(function(b) { b.classList.remove("selected"); });
+          optBtn.classList.add("selected");
+          selectedAnswer = key.slice(-1).toUpperCase();
+        };
+        optionsDiv.appendChild(optBtn);
+      }
+    });
+  } else {
+    document.getElementById("textAnswer").style.display = "block";
+    document.getElementById("submitBtn").style.display = "block";
+    document.getElementById("textAnswer").value = "";
+    showMathToolbar();
+    document.getElementById("textAnswer").focus();
+    const ta = document.getElementById("textAnswer");
+    if (textAnswerResizeHandler) {
+      ta.removeEventListener("input", textAnswerResizeHandler);
+    }
+    textAnswerResizeHandler = function() {
+      this.style.height = "auto";
+      this.style.height = this.scrollHeight + "px";
+    };
+    ta.addEventListener("input", textAnswerResizeHandler);
+    ta.style.height = "auto";
+    ta.style.height = ta.scrollHeight + "px";
+  }
+
+  document.getElementById("questionBox").style.display = "block";
+  document.getElementById("board").style.display = "none";
+  checkTimers(); // auto-submit if the timer had already expired
 }
 
 // ═══════════════════════════════════════════
@@ -1686,7 +1765,10 @@ function submitAnswerUI() {
 // ═══════════════════════════════════════════
 function backToBoard() {
   questionActive = false;
-  stopAIPolling(); // stop any ongoing AI polling
+  stopAIPolling();
+  // NOTE: deliberately do NOT clear questionEndTimes here — the timer
+  // keeps ticking while the student is on the board, so when they
+  // reopen the question they resume at the correct remaining time.
   document.getElementById("questionBox").style.display = "none";
   document.getElementById("board").style.display = "block";
   loadQuestionsForCategory(currentCategory);
